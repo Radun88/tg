@@ -1,0 +1,146 @@
+const fs = require('fs');
+const express = require('express');
+const bodyParser = require('body-parser');
+const request = require('request-promise-native'); // Используем request-promise-native для async/await
+const TelegramBot = require('node-telegram-bot-api');
+const FeedParser = require('feedparser');
+const winston = require('winston'); // Добавляем библиотеку для логирования
+const axios = require('axios');
+
+const { ClientID, AuthorizationKey } = {
+  ClientID: '6799932a-b8dc-4f98-9d0a-2ab693a6a760',
+  AuthorizationKey: 'Njc5OTkzMmEtYjhkYy00Zjk4LTlkMGEtMmFiNjkzYTZhNzYwOmMwNTEyMmUxLTNhNWUtNGVhZC1iMGUzLWY2ZGU2NDAzM2RkNw==',
+};
+
+// Параметры для работы с Telegram Bot API
+const botToken = '7837743766:AAFhl3yw-uTbUVHKP6yo_KsjGjQnUARLxKc'; // Вставьте ваш токен бота Telegram
+const channelId = '-1002276106407'; // ID чата или канала, куда будут отправляться сообщения
+const rssUrl = 'https://www.finam.ru/international/advanced/rsspoint/'; // URL вашей RSS-ленты
+const telegramBot = new TelegramBot(botToken, { polling: true });
+
+const app = express();
+app.use(bodyParser.json());
+app.use(bodyParser.urlencoded({ extended: false }));
+
+// Логирование
+const logger = winston.createLogger({
+  level: 'info',
+  format: winston.format.json(),
+  transports: [
+    new winston.transports.File({ filename: 'error.log', level: 'error' }),
+    new winston.transports.File({ filename: 'combined.log' }),
+  ],
+});
+
+// Функция для получения новых сообщений из RSS-ленты
+async function getNewRssItems() {
+  try {
+    const body = await request(rssUrl);
+    return body;
+  } catch (error) {
+    logger.error(`Ошибка при получении данных: ${error}`);
+    throw error;
+  }
+}
+
+// Обработчик входящих RSS-сообщений
+async function processRssFeed(rssData) {
+  let items = [];
+  try {
+    const parser = new FeedParser();
+    parser.on('readable', function() {
+      let item;
+      while (item = this.read()) {
+        items.push({
+          title: item.title,
+          description: item.description
+        });
+      }
+    });
+    parser.on('end', function() {
+      if (items.length > 0) {
+        items.forEach((item, index) => {
+          setTimeout(() => {
+            telegramBot.sendMessage(channelId, `📰 Заголовок: ${item.title}\nОписание: ${item.description}`);
+          }, 1000 * index); // Устанавливаем индивидуальную задержку для каждого сообщения
+        });
+      }
+    });
+    parser.end(rssData);
+  } catch (err) {
+    logger.error(`Ошибка при парсинге RSS: ${err}`);
+    throw err;
+  }
+  
+  return items;
+}
+
+// Обработка POST-запросов для получения обновлений из RSS
+app.post('/rss', async (req, res) => {
+  try {
+    const rssData = await getNewRssItems();
+    await processRssFeed(rssData);
+    res.sendStatus(200);
+  } catch (error) {
+    logger.error(`Ошибка при обработке запроса: ${error}`);
+    res.sendStatus(500);
+  }
+});
+
+// Настройка сервера
+app.listen(process.env.PORT || 3000, () => {
+  console.log('Бот запущен на порту 3000...');
+  logger.info('Бот запущен на порту 3000...');
+});
+
+// Функции для анализа и обработки новостей с помощью GigaChat
+const fetchResponse = async (url) => {
+  try {
+    const response = await axios.get(url);
+    return response.data;
+  } catch (error) {
+    console.error('Error fetching data from GigaChat API: ', error);
+    return {};
+  }
+};
+
+const generateRequestURL = ({ text }) => {
+  const baseURL = 'https://gigachore.com/chats/v1/messages';
+  const params = { client_id: ClientID, auth_key: AuthorizationKey };
+  return `${baseURL}?${new URLSearchParams(params).toString()}&&text=${encodeURIComponent(text)}`;
+};
+
+const analyzeNews = async (news) => {
+  const newsText = `${news.title}\n${news.description}`;
+  const gigaChatResponse = await fetchResponse(generateRequestURL({ text: newsText }));
+  const processedNews = postProcessing(gigaChatResponse);
+  return processedNews;
+};
+
+const sendToGroup = async (message) => {
+  // Здесь можно добавить логику для отправки сообщения в группу
+  console.log(`Отправлено сообщение в группу: ${message}`);
+};
+
+const main = async () => {
+  const rssData = await getNewRssItems();
+  const items = await processRssFeed(rssData);
+  const analyzedNews = await Promise.all(items.map(analyzeNews));
+  const finalMessages = analyzedNews.map(news => `📰 Заголовок: ${news.title}\nОписание: ${news.description}`);
+  await Promise.all(finalMessages.map(sendToGroup));
+};
+
+main().catch(error => console.error('Ошибка: ', error));
+
+// Функция для первичного получения и отправки последних новостей при запуске бота
+const initialRssUpdate = async () => {
+  try {
+    const rssData = await getNewRssItems();
+    const items = await processRssFeed(rssData);
+  } catch (error) {
+    logger.error(`Ошибка при первичном получении RSS: ${error}`);
+  }
+};
+
+// Первичное получение и отправка последних новостей при запуске бота
+initialRssUpdate();
