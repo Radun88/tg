@@ -1,58 +1,106 @@
-const { Telegraf } = require('telegraf')
-const fetch = require('node-fetch')
-const { v4: uuidv4} = require('uuid')
+import base64
+import requests
+import feedparser
+from telethon import TelegramClient, events
+from requests.packages.urllib3.exceptions import InsecureRequestWarning
+from uuid import uuid4
 
-const tg_api_key = '' // Телеграм апи ключ
-const gigachat_auth_data = '' // Авторизационные данные GigaChat
-const gigachat_scope = 'GIGACHAT_API_PERS' // GIGACHAT_API_CORP / GIGACHAT_API_PERS
-const profanity_check = true // false - [для gigachat_scope = GIGACHAT_API_CORP] отключает цензуру нейросети
+# Настройки
+tg_api_key = '7837743766:AAFhl3yw-uTbUVHKP6yo_KsjGjQnUARLxKc'  # Телеграм апи ключ
+channel_id = '-1002276106407'  # ID чата или канала, куда будут отправляться сообщения
+rss_url = 'https://www.finam.ru/international/advanced/rsspoint/'  # URL вашей RSS-ленты
+api_id = '831783808'  # Ваш API ID от Телеграм
+api_hash = '831783808'  # Ваш API HASH от Телеграм
+authorization_data = "Njc5OTkzMmEtYjhkYy00Zjk4LTlkMGEtMmFiNjkzYTZhNzYwOjFkNTY2NTcyLTdhN2ItNGQwZC1hNzJmLTVlNTdhMTA5ZmUwOQ=="  # авторизационные данные GigaChat
 
-const bot = new Telegraf(tg_api_key, {handlerTimeout: Infinity})
+# Отключаем предупреждения об использовании самоподписанных сертификатов
+requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 
-let gigachat_api_key // Получается автоматически
+# Конвертируем авторизационные данные в формат Base64
+base64_encoded_credentials = base64.b64encode(authorization_data.encode('utf-8')).decode('utf-8')
 
-bot.start(async (ctx) => {
+# Проверяем валидность авторизационных данных
+oauth_response = requests.post(
+    'https://ngw.devices.sberbank.ru:9443/api/v2/oauth',
+    headers={
+        'Authorization': f'Basic {base64_encoded_credentials}',
+        'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    data='scope=GIGACHAT_API_PERS',
+    verify=False  # Отключаем проверку SSL сертификатов
+)
 
-    const obj = await (await fetch('https://ngw.devices.sberbank.ru:9443/api/v2/oauth', {
-        method: 'POST',
-        headers: {
-            'Authorization': `Basic ${gigachat_auth_data}`,
-            'RqUID': uuidv4(), // генерация уникального uuid для получения апи ключа гигачата
-            'Content-Type': 'application/x-www-form-urlencoded',
-        },
-        body: encodeURI(`scope=${gigachat_scope}`)
+if oauth_response.status_code != 200:
+    print(f"Ошибка авторизации: {oauth_response.status_code}, {oauth_response.text}")
+else:
+    access_token = oauth_response.json().get('access_token')
+    if not access_token:
+        print("Не удалось получить access_token.")
+    else:
+        client = TelegramClient('session_name', api_id, api_hash)
 
-    })).json()
 
-    gigachat_api_key = obj.access_token
+        async def fetch_rss():
+            feed = feedparser.parse(rss_url)
+            return feed.entries
 
-    ctx.reply('Добро пожаловать в Телеграм бота GigaChat. Напиши запрос и тебе ответит последняя версия нейросети😎')
-})
 
-bot.on('message', async (ctx) => {
-
-    const obj = await (await fetch('https://gigachat.devices.sberbank.ru/api/v1/chat/completions',{ 
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${gigachat_api_key}`
-        },
-        body: JSON.stringify({
-            "model": 'GigaChat:latest',
-            'messages': [
-                {
-                    "role": 'user',
-                    "content": ctx.message.text
+        async def process_and_send_message(entry):
+            response = requests.post(
+                'https://gigachat.devices.sberbank.ru/api/v1/chat/completions',
+                headers={
+                    'Content-Type': 'application/json',
+                    'Authorization': f'Bearer {access_token}'
+                },
+                json={
+                    "model": 'GigaChat:latest',
+                    'messages': [
+                        {
+                            "role": 'user',
+                            "content": entry.title + " " + entry.description
+                        }
+                    ],
+                    'profanity_check': True
                 }
-            ],
-            'profanity_check': profanity_check
-        })
-    })).json()
+            )
 
-    ctx.reply(obj.choices[0].message.content)
-})
+            if response.status_code == 200:
+                reply = response.json().get('choices')[0].get('message').get('content')
+                await client.send_message(channel_id, reply)
+            else:
+                print(f"Ошибка при обращении к GigaChat API: {response.status_code}, {response.text}")
 
-bot.launch()
-console.log(`Telegram Bot запущен!`)
 
-// Дополнительный код здесь
+        @client.on(events.NewMessage(pattern='/start'))
+        async def start_message(event):
+            await event.reply('Добро пожаловать в Телеграм бота! RSS обновления будут отправлены сюда.')
+
+
+        @client.on(events.NewMessage(pattern='/update'))
+        async def update_rss(event):
+            entries = await fetch_rss()
+            for entry in entries:
+                await process_and_send_message(entry)
+            await event.reply('RSS обновления отправлены!')
+
+
+        @client.on(events.NewMessage(outgoing=True))
+        async def handle_personal_messages(event):
+            if event.is_private:
+                # Генерация случайного текста в стиле GigaChat
+                joke = requests.get('https://icanhazdadjoke.com/', headers={'Accept': 'application/json'}).json()[
+                    'joke']
+                await event.respond(joke)
+
+
+        async def send_latest_news():
+            entries = await fetch_rss()
+            if entries:
+                latest_entry = entries[0]
+                await process_and_send_message(latest_entry)
+
+
+        with client:
+            await client.start()
+            await send_latest_news()
+            client.run_until_disconnected()
